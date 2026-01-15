@@ -17,34 +17,31 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Optional: if you have large build artifacts, add build steps before deploy.
-
-      - name: Start SSH agent and add key
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
-
-      - name: Add server to known_hosts
+      - name: Install SSH key
+        shell: bash
         run: |
+          set -euo pipefail
           mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY_B64 }}" | base64 --decode > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H 159.223.224.43 >> ~/.ssh/known_hosts
 
       - name: Upload repo to ~/bnc-site on server
+        shell: bash
         run: |
+          set -euo pipefail
           rsync -az --delete \
             --exclude ".git/" \
             --exclude ".github/" \
-            -e "ssh -o StrictHostKeyChecking=yes" \
+            -e "ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=yes" \
             ./ ${{ secrets.DEPLOY_USER }}@159.223.224.43:~/bnc-site/
 
       - name: Publish to /var/www/bnc-site (sudo)
+        shell: bash
         run: |
-          ssh -o StrictHostKeyChecking=yes ${{ secrets.DEPLOY_USER }}@159.223.224.43 << 'EOF'
+          set -euo pipefail
+          ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=yes ${{ secrets.DEPLOY_USER }}@159.223.224.43 << 'EOF'
             set -euo pipefail
             sudo mkdir -p /var/www/bnc-site
             sudo rsync -az --delete ~/bnc-site/ /var/www/bnc-site/
-            # If you run a web server, you can reload it here (optional):
-            # sudo systemctl reload nginx || true
-            # sudo systemctl reload apache2 || true
           EOF
-
