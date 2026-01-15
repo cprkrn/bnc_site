@@ -1,4 +1,4 @@
-name: Deploy bnc-site
+name: Deploy bnc-site (debug)
 
 on:
   push:
@@ -17,36 +17,183 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install SSH key
+      - name: Debug - runner + repo context
         shell: bash
         run: |
           set -euo pipefail
+          echo "=== Runner ==="
+          uname -a
+          whoami
+          pwd
+          echo "=== Git ==="
+          git rev-parse --is-inside-work-tree || true
+          git rev-parse HEAD || true
+          echo "=== Repo files (top) ==="
+          ls -la
+          echo "=== Workflows dir ==="
+          ls -la .github || true
+          ls -la .github/workflows || true
+
+      - name: Debug - secrets presence (safe)
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "=== Secrets presence checks (NOT values) ==="
+          if [ -n "${{ secrets.DEPLOY_USER }}" ]; then
+            echo "DEPLOY_USER: present (len=${#DEPLOY_USER})"
+          else
+            echo "DEPLOY_USER: MISSING/EMPTY"
+          fi
+
+          if [ -n "${{ secrets.DEPLOY_SSH_KEY_B64 }}" ]; then
+            echo "DEPLOY_SSH_KEY_B64: present (len=${#DEPLOY_SSH_KEY_B64})"
+          else
+            echo "DEPLOY_SSH_KEY_B64: MISSING/EMPTY"
+          fi
+        env:
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY_B64: ${{ secrets.DEPLOY_SSH_KEY_B64 }}
+
+      - name: Fail fast if required secrets missing
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${{ secrets.DEPLOY_USER }}" ]; then
+            echo "ERROR: missing secret DEPLOY_USER"
+            exit 1
+          fi
+          if [ -z "${{ secrets.DEPLOY_SSH_KEY_B64 }}" ]; then
+            echo "ERROR: missing secret DEPLOY_SSH_KEY_B64"
+            exit 1
+          fi
+
+      - name: Install SSH key + known_hosts (debug)
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "=== SSH client versions ==="
+          ssh -V || true
+          rsync --version | head -n 2 || true
+          base64 --version | head -n 1 || true
+
+          echo "=== Prepare ~/.ssh ==="
           mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          echo "=== Decode private key from base64 secret ==="
+          # Use printf (not echo) to avoid adding a newline or mangling.
           printf '%s' "${{ secrets.DEPLOY_SSH_KEY_B64 }}" | base64 --decode > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -H 159.223.224.43 >> ~/.ssh/known_hosts
 
-          # sanity check: fail fast if key is malformed
+          echo "=== Validate decoded key file (ssh-keygen -y) ==="
+          # This will fail if the key is malformed.
           ssh-keygen -y -f ~/.ssh/id_ed25519 >/dev/null
+          echo "Key validation: OK"
 
-      - name: Upload repo to ~/bnc-site on server
+          echo "=== Show public key fingerprint (safe) ==="
+          ssh-keygen -lf ~/.ssh/id_ed25519 || true
+
+          echo "=== known_hosts scan ==="
+          ssh-keyscan -H 159.223.224.43 | tee -a ~/.ssh/known_hosts >/dev/null
+          chmod 644 ~/.ssh/known_hosts
+
+          echo "=== ~/.ssh perms ==="
+          ls -la ~/.ssh
+
+      - name: Debug - try SSH handshake (verbose, safe)
         shell: bash
         run: |
           set -euo pipefail
+          USER="${{ secrets.DEPLOY_USER }}"
+          HOST="159.223.224.43"
+
+          echo "=== Who am I trying to connect as? ==="
+          echo "USER=${USER}"
+          echo "HOST=${HOST}"
+
+          echo "=== SSH config used ==="
+          echo "ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=yes ${USER}@${HOST}"
+
+          echo "=== Attempt SSH (prints verbose auth flow) ==="
+          # -vvv is noisy but is the single best way to isolate why publickey is rejected.
+          # This does NOT print your private key. It will print key fingerprints and auth steps.
+          ssh -vvv -i ~/.ssh/id_ed25519 \
+            -o StrictHostKeyChecking=yes \
+            -o IdentitiesOnly=yes \
+            -o PreferredAuthentications=publickey \
+            -o PasswordAuthentication=no \
+            -o BatchMode=yes \
+            "${USER}@${HOST}" 'echo "remote:ok"; whoami; pwd; ls -la ~; test -d ~/bnc-site && echo "bnc-site exists" || echo "bnc-site missing"' || {
+              echo "SSH DEBUG FAILED"
+              exit 1
+            }
+
+      - name: Debug - check remote authorized_keys + sshd (requires sudo on remote)
+        shell: bash
+        run: |
+          set -euo pipefail
+          USER="${{ secrets.DEPLOY_USER }}"
+          HOST="159.223.224.43"
+
+          echo "=== Remote key + sshd checks (may require sudo) ==="
+          ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=yes "${USER}@${HOST}" <<'EOF'
+            set -euo pipefail
+            echo "=== Remote user ==="
+            whoami
+            echo "=== Home + ssh dirs ==="
+            echo "HOME=$HOME"
+            ls -la "$HOME" || true
+            ls -la "$HOME/.ssh" || true
+            echo "=== authorized_keys (exists?) ==="
+            test -f "$HOME/.ssh/authorized_keys" && (wc -l "$HOME/.ssh/authorized_keys" && sed -n '1,3p' "$HOME/.ssh/authorized_keys") || echo "authorized_keys missing"
+            echo "=== sshd effective settings (if sudo allowed) ==="
+            if sudo -n true 2>/dev/null; then
+              sudo sshd -T | egrep '^(pubkeyauthentication|passwordauthentication|permitrootlogin|allowusers|denyusers|authorizedkeysfile|challengeresponseauthentication)' || true
+            else
+              echo "No passwordless sudo for this user; skipping sshd -T"
+            fi
+EOF
+
+      - name: Upload repo to ~/bnc-site on server (debug)
+        shell: bash
+        run: |
+          set -euo pipefail
+          USER="${{ secrets.DEPLOY_USER }}"
+          HOST="159.223.224.43"
+
+          echo "=== Local files being deployed (top) ==="
+          ls -la
+          echo "=== rsync dry-run (what would change) ==="
+          rsync -azn --delete \
+            --exclude ".git/" \
+            --exclude ".github/" \
+            -e "ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes" \
+            ./ "${USER}@${HOST}:~/bnc-site/" | head -n 200 || true
+
+          echo "=== rsync actual ==="
           rsync -az --delete \
             --exclude ".git/" \
             --exclude ".github/" \
-            -e "ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=yes" \
-            ./ ${{ secrets.DEPLOY_USER }}@159.223.224.43:~/bnc-site/
+            -e "ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes" \
+            ./ "${USER}@${HOST}:~/bnc-site/"
 
-      - name: Publish to /var/www/bnc-site (sudo)
+      - name: Publish to /var/www/bnc-site (sudo) + verify
         shell: bash
         run: |
           set -euo pipefail
-          ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=yes ${{ secrets.DEPLOY_USER }}@159.223.224.43 << 'EOF'
+          USER="${{ secrets.DEPLOY_USER }}"
+          HOST="159.223.224.43"
+
+          echo "=== Remote publish + verify ==="
+          ssh -i ~/.ssh/id_ed25519 -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes "${USER}@${HOST}" <<'EOF'
             set -euo pipefail
+            echo "=== On remote ==="
+            whoami
+            echo "=== Ensure destination exists ==="
             sudo mkdir -p /var/www/bnc-site
+            echo "=== Copy via rsync (sudo) ==="
             sudo rsync -az --delete ~/bnc-site/ /var/www/bnc-site/
-            # optional:
-            # sudo systemctl reload nginx || true
-          EOF
+            echo "=== Verify deployed dir ==="
+            sudo ls -la /var/www/bnc-site | head -n 50
+EOF
