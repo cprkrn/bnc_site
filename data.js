@@ -1,6 +1,6 @@
 // Centralized data store for CEA Industries website
 window.appData = {
-  // Leadership team data
+  //  Leadership team data
   leadership: [
       {
           name: 'David Namdar',
@@ -66,7 +66,7 @@ window.appData = {
         name: 'Jon Najarian',
         title: 'Advisor',
         bio: 'Provides expertise and advisory services in markets and strategy.',
-        image: "jon.jpg"
+       image: "jon.jpg"
       },
       {
         name: 'Marc LoPresti',
