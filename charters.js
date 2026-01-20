@@ -43,8 +43,7 @@
                     </div>
                     <div class="flex-1">
                         <h3 class="text-xl font-medium text-gray-900 mb-1">${item.title}</h3>
-                        <p class="text-sm text-gray-600 mb-1">${item.description}</p>
-                        <p class="text-sm text-gray-500">Adopted: ${item.date}</p>
+                        <p class="text-sm text-gray-600">${item.description}</p>
                     </div>
                 </div>
 
